@@ -9,5 +9,5 @@ void loop() {
   // print analog data through serial port
   Serial.println(V0);
   // set the gap between two reads
-  delay(1000);
+  delay(500);
 }

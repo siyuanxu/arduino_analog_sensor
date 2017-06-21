@@ -1,13 +1,20 @@
-void setup() {
-  // set bdrate
-  Serial.begin(9600);
+
+int potpin = 0 ; 
+int ledpin = 13 ;
+int val = 0 ; 
+
+void setup()
+{
+    pinMode(ledpin,OUTPUT);
+    Serial.begin(9600);
+}
+void loop()
+{
+    digitalWrite(ledpin,HIGH);
+    delay(50);
+    digitalWrite(ledpin,LOW);
+    delay(50);//延时0.05秒
+    val =  analogRead(potpin);
+    Serial.println(val) ;
 }
 
-void loop() {
-  // read analog value from A0
-  int V0 = analogRead(A0);
-  // print analog data through serial port
-  Serial.println(V0);
-  // set the gap between two reads
-  delay(500);
-}

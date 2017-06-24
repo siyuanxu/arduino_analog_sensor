@@ -1,4 +1,3 @@
-
 int potpin = 0 ; 
 int ledpin = 13 ;
 int val = 0 ; 

@@ -78,4 +78,7 @@ Arduino自带10bit精度的ADC，无放大模块。对于一般的模拟信号�
 
 ![hx711_loadcell](project_sensor/hx711_loadcell.png)
 
+其中使用国产的[HX711](https://item.taobao.com/item.htm?spm=a1z09.2.0.0.zbwg8r&id=19276424320&_u=emvmhqjbc6d)进行模数转换。
 **未成功**
+
+上图的接线方式是参考hx711在YouTube上的视频设定的，我也比较困惑，为什么转换为数字信号后还要接到模拟接口？

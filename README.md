@@ -72,7 +72,7 @@ Arduino自带10bit精度的ADC，无放大模块。对于一般的模拟信号�
 
 尝试采用200kN的拉压传感器进行读取，传感器参数如下：
 
-![loadcell](project_sensor/loadcell.png)
+![loadcell](project_sensor/loadcell.PNG)
 
 接线方式如下：
 

@@ -167,5 +167,5 @@ def test_recording_keeps_wire_raw_while_result_uses_firmware_filter(tmp_path):
         engine.shutdown()
 
 
-def test_package_version_is_1_2_5():
-    assert __version__ == "1.2.5"
+def test_package_version_is_1_2_6():
+    assert __version__ == "1.2.6"

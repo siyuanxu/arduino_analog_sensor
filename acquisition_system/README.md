@@ -6,8 +6,8 @@ Siyuan XU studio · NHRI
 
 ## 下载和使用
 
-1. 在 [GitHub Releases](https://github.com/siyuanxu/arduino_analog_sensor/releases) 选择对应系统的桌面包。macOS Apple Silicon 使用 arm64 版本，解压后打开 ShearAcquisition.app。Windows x64 请完整解压并保留同目录的依赖文件，然后运行 ShearAcquisition.exe。
-2. 首次使用开发板时，可下载同一发布页的 Arduino 固件包。在 Arduino IDE 中打开与板型对应的草图，选择正确的开发板和串口后上传。UNO R4 使用 r4_adc，Mega 2560 使用 mega_adc。烧录前请先结束当前记录。
+1. Windows 10/11 x64 使用 [1.2.6 Windows 软件包](https://github.com/siyuanxu/arduino_analog_sensor/releases/download/v1.2.6/ShearAcquisition-1.2.6-windows-x64.zip)。完整解压后打开 `ShearAcquisition/ShearAcquisition.exe`。Mac 用户可下载 [1.2.5 Apple Silicon 版](https://github.com/siyuanxu/arduino_analog_sensor/releases/download/v1.2.5/ShearAcquisition-1.2.5-macOS-arm64.zip)。
+2. 对已烧好采集固件的板子，插入 USB 后在软件中选择端口并点击「连接」即可读取，不需要安装 Arduino IDE。Windows 在原装 UNO R4 Minima 或 Mega 2560 的采集接口明确缺少驱动时才请求管理员协助。正常设备直接使用；需要时按提示重新插拔 USB。R4 使用系统内置 USB 串口支持，Windows 包附有适用的原装 Mega 官方驱动。首次准备空白板的人员可取用[配套固件](https://github.com/siyuanxu/arduino_analog_sensor/releases/download/v1.2.5/ShearAcquisition-1.2.5-Arduino-firmware.zip)。
 3. 在“连接与配置”中选择设备和实际使用的通道，填写传感器量程、单位和小数位。设好 CSV 保存位置后，在“数据采集”中清零并开始记录。
 4. 结束记录后，“成果交付”页可查看两个 CSV。原始文件还保留通道参数与清零事件。
 

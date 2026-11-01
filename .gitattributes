@@ -1,0 +1,4 @@
+# These are upstream Windows driver package files. Any line-ending rewrite of
+# an INF invalidates its matching signed catalog, and catalogs are binary.
+acquisition_system/desktop_app/drivers/**/*.inf -text
+acquisition_system/desktop_app/drivers/**/*.cat -text

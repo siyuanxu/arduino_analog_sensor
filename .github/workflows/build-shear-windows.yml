@@ -29,9 +29,51 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r acquisition_system/desktop_app/requirements-dev.txt
 
+      - name: Test Windows drivers and simulated board acquisition
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+          ACQ_LOCAL_WORK: ${{ runner.temp }}\ShearAcquisition-tests
+          ACQ_QA_DIR: ${{ runner.temp }}\ShearAcquisition-qa
+          PYTHONPATH: acquisition_system
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:ACQ_QA_DIR | Out-Null
+          python -m pytest `
+            acquisition_system/desktop_app/tests/test_windows_drivers.py `
+            acquisition_system/desktop_app/tests/test_windows_driver_ui.py `
+            acquisition_system/desktop_app/tests/test_protocol_v2_filter.py `
+            acquisition_system/desktop_app/tests/test_ui.py::test_offscreen_full_board `
+            -q
+
+      - name: Verify bundled official Arduino driver package
+        shell: pwsh
+        run: |
+          $driverRoot = "acquisition_system\desktop_app\drivers\arduino-mega2560-official"
+          $expected = @{
+            "arduino.inf" = "b0a328e4c091c99bb5383f6ed1b1bb4ffb7294290a3d387dddbb1921cca6ffc3"
+            "arduino.cat" = "25f58519bc9ee9968607d8f0d8375f4736d30b17ff612d43c806b03f9460b4e3"
+          }
+          foreach ($entry in $expected.GetEnumerator()) {
+            $path = Join-Path $driverRoot $entry.Key
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "Missing official driver file: $($entry.Key)"
+            }
+            $actual = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -ne $entry.Value) {
+              throw "Driver hash mismatch: $($entry.Key)"
+            }
+          }
+          foreach ($catalog in @("arduino.cat")) {
+            $signature = Get-AuthenticodeSignature -FilePath (Join-Path $driverRoot $catalog)
+            if ($signature.Status -ne "Valid") {
+              throw "Invalid Arduino driver catalog signature: $catalog ($($signature.Status))"
+            }
+          }
+
       - name: Build Windows application
         shell: pwsh
         run: |
+          $driverSource = (Resolve-Path "acquisition_system\desktop_app\drivers").Path
           python -m PyInstaller `
             --noconfirm `
             --clean `
@@ -44,7 +86,14 @@ jobs:
             --workpath build/windows-x64 `
             --distpath dist `
             --specpath build `
+            --add-data "$driverSource;drivers" `
             acquisition_system/desktop_app/main.py
+
+      - name: Exercise read-only Windows PnP enumeration
+        shell: pwsh
+        run: |
+          $env:PYTHONPATH = "acquisition_system"
+          python -c "from desktop_app.windows_drivers import scan_windows_drivers; scan=scan_windows_drivers(); assert scan.available, scan.error; print(f'Enumerated {len(scan.devices)} supported present devices')"
 
       - name: Smoke-test packaged application
         shell: pwsh
@@ -65,17 +114,37 @@ jobs:
       - name: Create release archive
         shell: pwsh
         run: |
-          $archive = "ShearAcquisition-1.2.5-windows-x64.zip"
+          $archive = "ShearAcquisition-1.2.6-windows-x64.zip"
+          $driverRoot = "dist\ShearAcquisition\_internal\drivers\arduino-mega2560-official"
+          $expected = @{
+            "arduino.inf" = "b0a328e4c091c99bb5383f6ed1b1bb4ffb7294290a3d387dddbb1921cca6ffc3"
+            "arduino.cat" = "25f58519bc9ee9968607d8f0d8375f4736d30b17ff612d43c806b03f9460b4e3"
+          }
+          foreach ($entry in $expected.GetEnumerator()) {
+            $path = Join-Path $driverRoot $entry.Key
+            $actual = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -ne $entry.Value) {
+              throw "Packaged driver mismatch: $($entry.Key)"
+            }
+          }
           Compress-Archive -Path "dist\ShearAcquisition" -DestinationPath $archive
           Expand-Archive -Path $archive -DestinationPath archive-check
           if (-not (Test-Path "archive-check\ShearAcquisition\ShearAcquisition.exe")) {
             throw "Release archive does not contain the expected top-level application folder."
+          }
+          $archiveDriverRoot = "archive-check\ShearAcquisition\_internal\drivers\arduino-mega2560-official"
+          foreach ($entry in $expected.GetEnumerator()) {
+            $path = Join-Path $archiveDriverRoot $entry.Key
+            $actual = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -ne $entry.Value) {
+              throw "Archived driver mismatch: $($entry.Key)"
+            }
           }
 
       - name: Upload Windows release archive
         uses: actions/upload-artifact@v4
         with:
           name: shear-windows-x64
-          path: ShearAcquisition-1.2.5-windows-x64.zip
+          path: ShearAcquisition-1.2.6-windows-x64.zip
           if-no-files-found: error
           retention-days: 30

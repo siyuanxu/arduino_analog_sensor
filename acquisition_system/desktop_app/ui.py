@@ -2,7 +2,8 @@ from datetime import datetime
 from pathlib import Path
 import re
 import os
-from concurrent.futures import ThreadPoolExecutor
+import threading
+from concurrent.futures import Future, ThreadPoolExecutor
 import time
 import math
 import numpy as np
@@ -17,10 +18,13 @@ from .logging_support import get_runtime_logging, get_logger
 from .recording import recording_paths
 from .readout import CompactReadout
 from .plot_ranges import aligned_zero_ranges
+from . import windows_drivers
 
 logger = get_logger('ui')
 
 UI_REFRESH_INTERVAL_MS = 250
+WINDOWS_DEVICE_CHANGE_DEBOUNCE_MS = 600
+IS_WINDOWS = os.name == 'nt'
 
 COLORS = ['#2563eb', '#dc2626', '#16a34a', '#9333ea', '#ea580c', '#0891b2', '#db2777', '#64748b', '#4f46e5', '#65a30d', '#c026d3', '#0d9488', '#ca8a04', '#7c3aed', '#e11d48', '#0284c7']
 BOARD_NAMES = {'MEGA_2560':'Arduino Mega 2560', 'UNO_R4_MINIMA':'Arduino UNO R4 Minima', 'UNO_R4_WIFI':'Arduino UNO R4 WiFi'}
@@ -63,6 +67,8 @@ class MainWindow(W.QMainWindow):
         self.record_outcomes = {}
         self.bridge = CommandBridge(self)
         self.bridge.completed.connect(self.command_complete)
+        self.driver_bridge = CommandBridge(self)
+        self.driver_bridge.completed.connect(self.driver_command_complete)
         self.shutdown_done = False
         self.closing = False
         self.pending_commands = 0
@@ -70,6 +76,11 @@ class MainWindow(W.QMainWindow):
         self.connection_port = None
         self.port_metadata = {}
         self.port_detection_summary = ''
+        self.driver_check_pending = False
+        self.driver_install_pending = False
+        self.driver_rescan_requested = False
+        self.driver_attempted_ids = set()
+        self.driver_devices = {}
         self.setWindowTitle("多通道直剪试验采集工作站")
         self.resize(1280, 720)
         self.seen_revision = -1
@@ -98,6 +109,10 @@ class MainWindow(W.QMainWindow):
         self._recording_ui_state = None
         self.cards, self.curves, self.curve_checks = [], [], []
         self.build()
+        self.driver_timer = QtCore.QTimer(self)
+        self.driver_timer.setSingleShot(True)
+        self.driver_timer.setInterval(WINDOWS_DEVICE_CHANGE_DEBOUNCE_MS)
+        self.driver_timer.timeout.connect(self.refresh_ports)
         self.refresh_ports()
         self.timer = QtCore.QTimer(self)
         self.timer.timeout.connect(self.refresh)
@@ -151,6 +166,23 @@ class MainWindow(W.QMainWindow):
         self.port_status.setSizePolicy(W.QSizePolicy.Policy.Ignored, W.QSizePolicy.Policy.Fixed)
         self.port_status.setStyleSheet('padding:2px;font-weight:600;color:#16324d')
         cfg.addWidget(self.port_status)
+        driver_row = W.QHBoxLayout()
+        self.driver_status = W.QLabel()
+        self.driver_status.setWordWrap(False)
+        self.driver_status.setSizePolicy(W.QSizePolicy.Policy.Ignored, W.QSizePolicy.Policy.Fixed)
+        self.driver_status.setStyleSheet('padding:2px;color:#92400e')
+        self.driver_status.hide()
+        driver_row.addWidget(self.driver_status, 1)
+        self.driver_device = W.QComboBox()
+        self.driver_device.setAccessibleName('需要修复驱动的开发板')
+        self.driver_device.setMinimumWidth(190)
+        self.driver_device.hide()
+        driver_row.addWidget(self.driver_device)
+        self.driver_install_btn = self.button("安装驱动…", self.install_selected_windows_driver)
+        self.driver_install_btn.setToolTip("为选中的 Arduino 安装随软件提供的官方驱动；Windows 会要求管理员授权。")
+        self.driver_install_btn.hide()
+        driver_row.addWidget(self.driver_install_btn)
+        cfg.addLayout(driver_row)
         self.port.currentIndexChanged.connect(self.update_selected_device)
         self.port.editTextChanged.connect(self.update_selected_device)
         self.mode.currentIndexChanged.connect(self.update_selected_device)
@@ -802,7 +834,195 @@ class MainWindow(W.QMainWindow):
             W.QMessageBox.warning(self, "操作未完成", str(e))
             return None
 
-    def refresh_ports(self):
+    def run_driver_command(self, fn, on_success, on_error=None):
+        """Run Windows device inspection/repair without blocking Qt or serial I/O."""
+        future = Future()
+
+        def worker():
+            try:
+                future.set_result(fn())
+            except BaseException as error:
+                future.set_exception(error)
+            try:
+                self.driver_bridge.completed.emit(future, (on_success, on_error))
+            except RuntimeError:
+                # The window may have been destroyed while Windows was showing UAC.
+                pass
+
+        # Driver checks and UAC can wait on Windows. A daemon worker lets the
+        # acquisition app close immediately even when the system dialog remains.
+        threading.Thread(target=worker, daemon=True,
+                         name="Windows driver operation").start()
+
+    @QtCore.Slot(object, object)
+    def driver_command_complete(self, future, callbacks):
+        if self.closing or self.shutdown_done:
+            return
+        on_success, on_error = callbacks
+        try:
+            result = future.result()
+            on_success(result)
+        except Exception as error:
+            logger.exception("Windows 驱动操作未完成")
+            if on_error:
+                on_error(error)
+
+    def set_driver_message(self, text='', detail='', devices=(), button=False):
+        self.driver_status.setText(text)
+        self.driver_status.setToolTip(detail or text)
+        self.driver_status.setVisible(bool(text))
+        self.driver_devices = {device.instance_id: device for device in devices}
+        self.driver_device.blockSignals(True)
+        self.driver_device.clear()
+        for device in devices:
+            self.driver_device.addItem(device.label, device.instance_id)
+        self.driver_device.blockSignals(False)
+        choose = len(devices) > 1
+        self.driver_device.setVisible(choose)
+        self.driver_install_btn.setVisible(bool(button and devices))
+        self.driver_install_btn.setEnabled(bool(button and devices and
+                                                not self.driver_install_pending))
+
+    def check_windows_drivers(self, force=False):
+        if (not IS_WINDOWS or self.driver_install_pending or self.closing or
+                self.engine.connected or self.pending_connection or self.engine.recorder or
+                self.mode.currentIndex() != 0):
+            return
+        if self.driver_check_pending:
+            self.driver_rescan_requested = self.driver_rescan_requested or force
+            return
+        self.driver_check_pending = True
+
+        def finished(scan):
+            self.driver_check_pending = False
+            repeat = self.driver_rescan_requested
+            self.driver_rescan_requested = False
+            if (self.closing or self.engine.connected or self.pending_connection or
+                    self.engine.recorder or self.mode.currentIndex() != 0):
+                self.set_driver_message()
+                return
+            self.apply_windows_driver_scan(scan, force=force)
+            if repeat and not self.driver_install_pending:
+                QtCore.QTimer.singleShot(0, lambda: self.check_windows_drivers(force=True))
+
+        def failed(error):
+            self.driver_check_pending = False
+            repeat = self.driver_rescan_requested
+            self.driver_rescan_requested = False
+            logger.warning("Windows 驱动检查失败：%s", error)
+            if (not self.closing and not self.engine.connected and
+                    not self.pending_connection and not self.engine.recorder and
+                    self.mode.currentIndex() == 0 and (force or not self.port_metadata)):
+                self.set_driver_message("无法检查 Arduino 驱动 · 可重试",
+                                        str(error), button=False)
+            if repeat and not self.driver_install_pending:
+                QtCore.QTimer.singleShot(0, lambda: self.check_windows_drivers(force=True))
+
+        self.run_driver_command(windows_drivers.scan_windows_drivers, finished, failed)
+
+    def windows_device_changed(self):
+        """Coalesce USB arrival/removal events before scanning Windows PnP once."""
+        if (IS_WINDOWS and not self.closing and not self.engine.connected and
+                not self.pending_connection and not self.engine.recorder and
+                not self.driver_install_pending and self.mode.currentIndex() == 0):
+            self.driver_timer.start()
+
+    def apply_windows_driver_scan(self, scan, force=False):
+        if not scan.available:
+            if force or (scan.error and not self.port_metadata):
+                self.set_driver_message("无法检查 Arduino 驱动 · 可重新扫描",
+                                        scan.error or "Windows 设备检查不可用")
+            return
+        repairable = [device for device in scan.devices if device.repairable]
+        bootloaders = [device for device in scan.devices
+                       if device.problem_code is not None and device.role == 'bootloader']
+        faults = [device for device in scan.devices
+                  if device.role == 'runtime' and device.problem_code not in (0, 28)]
+        if repairable:
+            detail = "\n".join(f"{device.label}：设备错误代码 {device.problem_code}"
+                               for device in repairable)
+            pending = [device for device in repairable
+                       if device.instance_id not in self.driver_attempted_ids]
+            if len(repairable) == 1 and pending:
+                self.set_driver_message("检测到 Arduino 缺少驱动 · 等待 Windows 授权…",
+                                        detail, repairable)
+                self.start_windows_driver_install(repairable[0], automatic=True)
+                return
+            text = ("发现多个缺驱动的 Arduino · 请选择设备"
+                    if len(repairable) > 1 else
+                    "Arduino 驱动未安装 · 点击重试")
+            self.set_driver_message(text, detail, repairable, button=True)
+            return
+        if bootloaders:
+            detail = "\n".join(device.label for device in bootloaders)
+            self.set_driver_message("R4 处于固件升级模式 · 请复位后重新扫描", detail)
+            return
+        if faults:
+            detail = "\n".join(f"{device.label}：设备错误代码 {device.problem_code}"
+                               for device in faults)
+            self.set_driver_message("Arduino 设备异常 · 无需重复安装驱动", detail)
+            return
+        self.set_driver_message()
+
+    def install_selected_windows_driver(self):
+        instance_id = self.driver_device.currentData()
+        if instance_id is None and len(self.driver_devices) == 1:
+            instance_id = next(iter(self.driver_devices))
+        device = self.driver_devices.get(instance_id)
+        if device is not None:
+            self.start_windows_driver_install(device, automatic=False)
+
+    def start_windows_driver_install(self, device, automatic=False):
+        if (self.driver_install_pending or not device.repairable or self.closing or
+                self.engine.connected or self.pending_connection or self.engine.recorder or
+                self.mode.currentIndex() != 0):
+            return
+        self.driver_attempted_ids.add(device.instance_id)
+        self.driver_install_pending = True
+        self.set_driver_message("正在请求 Windows 安装 Arduino 驱动…",
+                                f"{device.label}\n请在系统窗口中确认管理员授权。",
+                                [device])
+
+        def finished(result):
+            self.driver_install_pending = False
+            current = result.device
+            if result.success:
+                self.set_driver_message("驱动已安装 · 正在重新扫描端口", result.message)
+                QtCore.QTimer.singleShot(300, self.refresh_ports)
+            elif getattr(result, 'restart_required', False):
+                text = ("驱动已加入 Windows · 请重启后重新扫描"
+                        if getattr(result, 'staged', False) else
+                        "Windows 要求重启 · 重启后重新扫描")
+                self.set_driver_message(text, result.message)
+            elif getattr(result, 'replug_required', False):
+                text = ("驱动已加入 Windows · 请重新插拔 USB"
+                        if getattr(result, 'staged', False) else
+                        "请重新插拔 Arduino USB 后再扫描")
+                self.set_driver_message(text, result.message)
+            elif not current.repairable:
+                self.set_driver_message("Arduino 设备异常 · 无需重复安装驱动",
+                                        result.message)
+            elif getattr(result, 'staged', False):
+                self.set_driver_message("驱动已加入 Windows · 请重新扫描",
+                                        result.message)
+            elif result.cancelled:
+                self.set_driver_message("已取消驱动安装 · 可点击重试", result.message,
+                                        [current], button=True)
+            else:
+                self.set_driver_message("驱动安装未完成 · 可点击重试", result.message,
+                                        [current], button=True)
+
+        def failed(error):
+            self.driver_install_pending = False
+            self.set_driver_message("驱动安装未完成 · 可点击重试", str(error),
+                                    [device], button=True)
+
+        logger.info("请求 Windows Arduino 驱动修复：board=%s automatic=%s",
+                    device.board_model, automatic)
+        self.run_driver_command(lambda: windows_drivers.repair_windows_driver(device),
+                                finished, failed)
+
+    def refresh_ports(self, *_args, check_driver=True):
         previous = self.connection_port if self.engine.connected else self.port.currentData() or self.port.currentText()
         self.port.blockSignals(True)
         self.port.clear()
@@ -825,6 +1045,8 @@ class MainWindow(W.QMainWindow):
         finally:
             self.port.blockSignals(False)
         self.update_selected_device()
+        if IS_WINDOWS and check_driver:
+            self.check_windows_drivers(force=True)
 
     def update_selected_device(self, *_args):
         if self.engine.connected or self.pending_connection:
@@ -833,6 +1055,8 @@ class MainWindow(W.QMainWindow):
         self.port.setEnabled(real)
         self.refresh_ports_btn.setEnabled(real)
         if not real:
+            self.driver_timer.stop()
+            self.set_driver_message()
             self.port_status.setText("已选择模拟设备（SIMULATED），不会连接实际开发板。")
             return
         selected = self.port.currentData() if self.port.currentText() == self.port.itemText(self.port.currentIndex()) else self.port.currentText().strip()
@@ -859,6 +1083,8 @@ class MainWindow(W.QMainWindow):
         self.refresh_ports_btn.setEnabled(not busy and self.mode.currentIndex() == 0)
         self.connect_btn.setEnabled(not busy)
         self.disconnect_btn.setEnabled(engine.connected)
+        if busy and self.driver_status.isVisible():
+            self.set_driver_message()
         ready = engine.connected and engine.cap is not None and engine.latest is not None
         self.connect_btn.setText('已连接' if ready else '连接中…' if busy else '连接')
         if engine.connected:
@@ -1131,6 +1357,19 @@ class MainWindow(W.QMainWindow):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self.relayout_readouts()
+
+    def nativeEvent(self, event_type, message):
+        if IS_WINDOWS and bytes(event_type) in (b'windows_generic_MSG',
+                                                b'windows_dispatcher_MSG'):
+            try:
+                import ctypes
+                from ctypes import wintypes
+                native_message = wintypes.MSG.from_address(int(message))
+                if native_message.message == 0x0219:  # WM_DEVICECHANGE
+                    self.windows_device_changed()
+            except (TypeError, ValueError, OSError):
+                logger.debug("无法解析 Windows 设备变化消息", exc_info=True)
+        return super().nativeEvent(event_type, message)
 
     def resize_plot(self):
         self.right.setGeometry(self.plot.getViewBox().sceneBoundingRect())
@@ -1410,6 +1649,7 @@ class MainWindow(W.QMainWindow):
         self.centralWidget().setEnabled(False)
         self.timer.stop()
         self.target_timer.stop()
+        self.driver_timer.stop()
         self.status_label.setText("正在结束记录并关闭设备…")
         def finished():
             self.shutdown_done = True

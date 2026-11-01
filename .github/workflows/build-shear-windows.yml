@@ -1,0 +1,81 @@
+name: Build ShearAcquisition for Windows
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-x64:
+    runs-on: windows-2022
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12 x64
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          architecture: x64
+          cache: pip
+          cache-dependency-path: acquisition_system/desktop_app/requirements-dev.txt
+
+      - name: Install build dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r acquisition_system/desktop_app/requirements-dev.txt
+
+      - name: Build Windows application
+        shell: pwsh
+        run: |
+          python -m PyInstaller `
+            --noconfirm `
+            --clean `
+            --windowed `
+            --onedir `
+            --name ShearAcquisition `
+            --paths acquisition_system `
+            --exclude-module PySide6.QtWebEngineCore `
+            --exclude-module PySide6.QtWebEngineWidgets `
+            --workpath build/windows-x64 `
+            --distpath dist `
+            --specpath build `
+            acquisition_system/desktop_app/main.py
+
+      - name: Smoke-test packaged application
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+          ACQ_LOCAL_WORK: ${{ runner.temp }}\ShearAcquisition
+        run: |
+          $process = Start-Process `
+            -FilePath "dist\ShearAcquisition\ShearAcquisition.exe" `
+            -PassThru
+          Start-Sleep -Seconds 6
+          if ($process.HasExited) {
+            throw "Packaged application exited during startup with code $($process.ExitCode)."
+          }
+          Stop-Process -Id $process.Id
+          Wait-Process -Id $process.Id -ErrorAction SilentlyContinue
+
+      - name: Create release archive
+        shell: pwsh
+        run: |
+          $archive = "ShearAcquisition-1.2.5-windows-x64.zip"
+          Compress-Archive -Path "dist\ShearAcquisition" -DestinationPath $archive
+          Expand-Archive -Path $archive -DestinationPath archive-check
+          if (-not (Test-Path "archive-check\ShearAcquisition\ShearAcquisition.exe")) {
+            throw "Release archive does not contain the expected top-level application folder."
+          }
+
+      - name: Upload Windows release archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: shear-windows-x64
+          path: ShearAcquisition-1.2.5-windows-x64.zip
+          if-no-files-found: error
+          retention-days: 30

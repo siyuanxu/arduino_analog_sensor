@@ -209,16 +209,49 @@ def test_old_windows_stages_mega_once_then_requests_replug(monkeypatch):
     assert result.staged and result.replug_required and "不支持定向" in result.message
 
 
-def test_unattended_elevation_wait_is_bounded(monkeypatch):
+def test_late_elevation_result_is_returned_once_without_fake_timeout(monkeypatch):
+    calls = []
+
     def slow_worker(arguments, timeout):
-        time.sleep(.2)
+        calls.append((arguments, timeout))
+        time.sleep(.08)
         return drivers._ElevatedRun(0)
 
     monkeypatch.setattr(drivers, "_shell_execute_pnputil", slow_worker)
     started = time.monotonic()
     result = drivers._run_pnputil_elevated(["/scan-devices"], timeout_seconds=.01)
-    assert time.monotonic() - started < .15
-    assert result.error and "等待超过" in result.error
+    assert time.monotonic() - started >= .07
+    assert result.exit_code == 0 and not result.error
+    assert calls == [(["/scan-devices"], .01)]
+
+
+def test_process_timeout_warns_once_then_keeps_waiting(monkeypatch):
+    class Kernel:
+        def __init__(self):
+            self.results = iter((0x00000102, 0x00000102, 0))
+            self.calls = 0
+
+        def WaitForSingleObject(self, process, interval):
+            self.calls += 1
+            assert process == 123 and interval == 10
+            return next(self.results)
+
+    warnings = []
+    monkeypatch.setattr(drivers.logger, "warning", lambda *args: warnings.append(args))
+    kernel = Kernel()
+    assert drivers._wait_for_process(kernel, 123, 10) is None
+    assert kernel.calls == 3 and len(warnings) == 1
+
+
+def test_elevation_cancel_is_returned_for_ui_retry(monkeypatch):
+    expected = drivers._ElevatedRun(None, cancelled=True, error="cancelled")
+    calls = []
+    monkeypatch.setattr(
+        drivers, "_shell_execute_pnputil",
+        lambda arguments, timeout: calls.append(arguments) or expected)
+    result = drivers._run_pnputil_elevated(["/scan-devices"])
+    assert result is expected and result.cancelled
+    assert calls == [["/scan-devices"]]
 
 
 def test_scan_is_safe_and_unavailable_off_windows():

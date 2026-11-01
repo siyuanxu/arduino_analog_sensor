@@ -39,6 +39,8 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path $env:ACQ_QA_DIR | Out-Null
           python -m pytest `
+            acquisition_system/desktop_app/tests/test_storage_resilience.py `
+            acquisition_system/desktop_app/tests/test_reconnect_session.py `
             acquisition_system/desktop_app/tests/test_windows_drivers.py `
             acquisition_system/desktop_app/tests/test_windows_driver_ui.py `
             acquisition_system/desktop_app/tests/test_protocol_v2_filter.py `
@@ -114,7 +116,7 @@ jobs:
       - name: Create release archive
         shell: pwsh
         run: |
-          $archive = "ShearAcquisition-1.2.6-windows-x64.zip"
+          $archive = "ShearAcquisition-1.2.7-windows-x64.zip"
           $driverRoot = "dist\ShearAcquisition\_internal\drivers\arduino-mega2560-official"
           $expected = @{
             "arduino.inf" = "b0a328e4c091c99bb5383f6ed1b1bb4ffb7294290a3d387dddbb1921cca6ffc3"
@@ -145,6 +147,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: shear-windows-x64
-          path: ShearAcquisition-1.2.6-windows-x64.zip
+          path: ShearAcquisition-1.2.7-windows-x64.zip
           if-no-files-found: error
           retention-days: 30

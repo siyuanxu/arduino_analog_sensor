@@ -107,6 +107,8 @@ class MainWindow(W.QMainWindow):
         self._delivery_state_signature = None
         self._recorder_path_signature = None
         self._recording_ui_state = None
+        self._lock_wait_started = None
+        self._lock_warning_shown = False
         self.cards, self.curves, self.curve_checks = [], [], []
         self.build()
         self.driver_timer = QtCore.QTimer(self)
@@ -979,8 +981,8 @@ class MainWindow(W.QMainWindow):
             return
         self.driver_attempted_ids.add(device.instance_id)
         self.driver_install_pending = True
-        self.set_driver_message("正在请求 Windows 安装 Arduino 驱动…",
-                                f"{device.label}\n请在系统窗口中确认管理员授权。",
+        self.set_driver_message("正在等待 Windows 完成驱动处理…",
+                                f"{device.label}\n请在系统窗口中确认或取消管理员授权。",
                                 [device])
 
         def finished(result):
@@ -1396,8 +1398,25 @@ class MainWindow(W.QMainWindow):
         self.refresh_logging()
         e = self.engine
         if not e.lock.acquire(blocking=False):
+            if self._lock_wait_started is None:
+                self._lock_wait_started = time.monotonic()
+            if time.monotonic() - self._lock_wait_started >= 3 and not self._lock_warning_shown:
+                self._lock_warning_shown = True
+                self.banner.setText("采集处理等待中 · 当前读数可能已过期")
+                self.banner.setToolTip("文件写入或采集处理尚未返回，暂时无法确认记录进度。")
+                self.port_status.setText("采集处理等待中 · 暂时无法确认状态")
+                self.status_label.setText("正在等待处理完成，请检查保存位置是否正常响应")
+                if self.was_recording:
+                    self.record_label.setText("● 写入等待中 · 进度尚未确认")
+                self.start_btn.setEnabled(False)
             return
         try:
+            self._lock_wait_started = None
+            if self._lock_warning_shown:
+                self._lock_warning_shown = False
+                self._live_ui_signature = None
+                self._connection_ui_signature = None
+                self._recording_ui_state = None
             self.refresh_connection_state(e)
             if e.cap and self.cap_identity != (e.cap.board_model, id(e.cap)):
                 self.cap_identity = (e.cap.board_model, id(e.cap))

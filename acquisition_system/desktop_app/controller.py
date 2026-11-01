@@ -20,6 +20,7 @@ class AcquisitionEngine:
         self.queue = Queue(maxsize=256)
         self.closed = threading.Event()
         self.pending_fatal = None
+        self.connection_session = 0
         self.transport = None
         self.parser = Parser()
         self.framer = LineFramer()
@@ -80,12 +81,18 @@ class AcquisitionEngine:
             self._health_warning = None
             self._last_health_check = 0.0
             self.message("SIMULATED 模拟设备连接中" if simulated else "正在连接并等待 INFO / HEADER")
-            self.transport = Transport(self.queue, self.fatal, port, simulated, interval)
+            self.transport = Transport(
+                self.queue, self.fatal, port, simulated, interval,
+                session_id=self.connection_session,
+            )
             self.transport.start()
 
     def disconnect(self, reason="用户断开连接"):
         logger.info("断开连接：reason=%s", reason)
         with self.lock:
+            # Invalidate every message from the previous producer before
+            # waiting for it. Some USB drivers can outlive the bounded join.
+            self.connection_session += 1
             tr = self.transport
             self.transport = None
             if tr:
@@ -104,13 +111,20 @@ class AcquisitionEngine:
             if recording_closed:
                 self.message(reason)
 
-    def fatal(self, text):
+    def fatal(self, text, session_id=None):
+        producer = self.transport
+        if session_id is not None and session_id != self.connection_session:
+            logger.info("忽略旧连接的致命状态：session=%s current=%s",
+                        session_id, self.connection_session)
+            return
         if threading.current_thread() is not self.worker:
-            self.pending_fatal = text
-            if self.transport:
-                self.transport.stop()
+            self.pending_fatal = (session_id, text)
+            if producer:
+                producer.stop()
             return
         with self.lock:
+            if session_id is not None and session_id != self.connection_session:
+                return
             self._error(text, stop=True, level="ERROR")
             self.connected = False
             if self.transport:
@@ -131,13 +145,22 @@ class AcquisitionEngine:
     def _run(self):
         while not self.closed.is_set():
             if self.pending_fatal:
-                text, self.pending_fatal = self.pending_fatal, None
-                self.fatal(text)
+                pending, self.pending_fatal = self.pending_fatal, None
+                if isinstance(pending, tuple):
+                    session_id, text = pending
+                else:  # Compatibility with an older direct test fixture.
+                    session_id, text = None, pending
+                self.fatal(text, session_id)
             try:
-                kind, payload, received, mono = self.queue.get(timeout=.1)
+                queued = self.queue.get(timeout=.1)
             except Empty:
                 self._check_connection_health()
                 continue
+            if len(queued) == 5:
+                kind, payload, received, mono, session_id = queued
+            else:
+                kind, payload, received, mono = queued
+                session_id = None
             if kind == "command":
                 fn, args, kwargs, done, result = payload
                 try:
@@ -149,6 +172,10 @@ class AcquisitionEngine:
                     done.set()
                 continue
             with self.lock:
+                if session_id is not None and session_id != self.connection_session:
+                    logger.info("忽略旧连接消息：kind=%s session=%s current=%s",
+                                kind, session_id, self.connection_session)
+                    continue
                 if not self.connected:
                     continue
                 if kind == "disconnect":

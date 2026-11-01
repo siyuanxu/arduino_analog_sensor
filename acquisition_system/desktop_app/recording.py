@@ -3,7 +3,9 @@ import csv
 from dataclasses import asdict, replace
 from datetime import datetime
 import json
+import os
 from pathlib import Path
+import time
 
 from .models import labels
 from . import __version__
@@ -11,6 +13,7 @@ from . import __version__
 
 RAW_SUFFIX = "_原始数据"
 RESULT_SUFFIX = "_测试结果"
+SYNC_INTERVAL_SECONDS = 10.0
 
 
 def adc_processing_metadata(cap):
@@ -159,6 +162,7 @@ class Recorder:
             self.result_writer = csv.DictWriter(self.result_file, fieldnames=self.result_headers)
             self.result_writer.writeheader()
             self.result_file.flush()
+            self.sync()
         except Exception:
             for stream in (self.raw_file, self.result_file):
                 if stream is not None:
@@ -211,16 +215,32 @@ class Recorder:
                     result_row[self.result_header_by_index[index]] = f"{value:.{config.decimals}f}"
                 self.result_writer.writerow(result_row)
                 self.result_file.flush()
+            if time.monotonic() - self.last_sync >= SYNC_INTERVAL_SECONDS:
+                self.sync()
         except (OSError, csv.Error) as error:
             if isinstance(error, OSError):
                 raise
             raise OSError(f"CSV写入失败：{error}") from error
+
+    def sync(self):
+        """Ask the OS to persist both files without changing the sampling rate."""
+        for stream in (self.raw_file, self.result_file):
+            stream.flush()
+            os.fsync(stream.fileno())
+        self.last_sync = time.monotonic()
 
     def close(self):
         first_error = None
         for stream in (self.raw_file, self.result_file):
             if stream is None:
                 continue
+            try:
+                if not stream.closed:
+                    stream.flush()
+                    os.fsync(stream.fileno())
+            except Exception as error:
+                if first_error is None:
+                    first_error = error
             try:
                 stream.close()
             except Exception as error:

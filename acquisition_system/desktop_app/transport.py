@@ -17,20 +17,29 @@ def enumerate_ports():
 
 
 class Transport(threading.Thread):
-    def __init__(self, queue, fatal, port=None, simulated=None, interval=1.0):
+    def __init__(self, queue, fatal, port=None, simulated=None, interval=1.0,
+                 session_id=None):
         super().__init__(daemon=True, name="ADC transport")
         self.queue, self.fatal = queue, fatal
         self.port, self.simulated, self.interval = port, simulated, interval
+        self.session_id = session_id
         self.stopped = threading.Event()
         self.serial = None
 
     def put(self, kind, payload):
         try:
-            self.queue.put((kind, payload, now_iso(), time.monotonic()), timeout=0.25)
+            item = (kind, payload, now_iso(), time.monotonic())
+            if self.session_id is not None:
+                item += (self.session_id,)
+            self.queue.put(item, timeout=0.25)
             return True
         except Full:
             logger.error("采集队列溢出：source=%s port=%s", self.simulated or "SERIAL", self.port or "-")
-            self.fatal("采集队列溢出，记录已停止；请降低系统负载后重新连接")
+            message = "采集队列溢出，记录已停止；请降低系统负载后重新连接"
+            if self.session_id is None:
+                self.fatal(message)
+            else:
+                self.fatal(message, self.session_id)
             self.stopped.set()
             return False
 
@@ -58,6 +67,10 @@ class Transport(threading.Thread):
                 last_request = time.monotonic()
                 while not self.stopped.is_set():
                     data = self.serial.read(min(max(self.serial.in_waiting, 1), 4096))
+                    # stop() may have been called while a driver-level read was
+                    # blocked.  Never publish that late read into a new session.
+                    if self.stopped.is_set():
+                        break
                     if data and not self.put("bytes", data):
                         break
                     # Some boards reset when the port opens; request again after boot.

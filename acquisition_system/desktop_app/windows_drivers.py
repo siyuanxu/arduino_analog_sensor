@@ -5,10 +5,8 @@ import hashlib
 import json
 import os
 from pathlib import Path
-from queue import Empty, Queue
 import subprocess
 import sys
-import threading
 import time
 from typing import Callable
 
@@ -221,7 +219,7 @@ def _driver_path(device):
 
 
 def _shell_execute_pnputil(arguments, timeout_seconds):
-    """Windows ShellExecute worker；由 daemon 线程隔离 UAC 等待。"""
+    """Windows ShellExecute worker；调用方由 UI 的 daemon 线程隔离。"""
     if os.name != "nt":
         return _ElevatedRun(None, error="驱动安装仅适用于 Windows")
     from ctypes import wintypes
@@ -267,11 +265,10 @@ def _shell_execute_pnputil(arguments, timeout_seconds):
             return _ElevatedRun(None, cancelled=True, error="用户取消了管理员授权")
         return _ElevatedRun(None, error=f"无法启动驱动安装（Windows 错误 {code}）")
     try:
-        wait_result = kernel32.WaitForSingleObject(info.hProcess, int(timeout_seconds * 1000))
-        if wait_result == 0x00000102:
-            return _ElevatedRun(None, error="驱动操作等待超过 120 秒；可稍后重新检查")
-        if wait_result != 0:
-            return _ElevatedRun(None, error=f"等待驱动操作失败（Windows 结果 {wait_result}）")
+        wait_error = _wait_for_process(
+            kernel32, info.hProcess, max(1, int(timeout_seconds * 1000)))
+        if wait_error:
+            return _ElevatedRun(None, error=wait_error)
         exit_code = wintypes.DWORD()
         if not kernel32.GetExitCodeProcess(info.hProcess, ctypes.byref(exit_code)):
             return _ElevatedRun(None, error="无法取得驱动安装结果")
@@ -280,18 +277,24 @@ def _shell_execute_pnputil(arguments, timeout_seconds):
         kernel32.CloseHandle(info.hProcess)
 
 
+def _wait_for_process(kernel32, process, warning_interval_ms):
+    """等待真实退出；第一次超时只记录警告，不丢弃后台操作。"""
+    warned = False
+    while True:
+        result = kernel32.WaitForSingleObject(process, warning_interval_ms)
+        if result == 0:
+            return None
+        if result == 0x00000102:
+            if not warned:
+                logger.warning("Windows 驱动操作仍在等待用户授权或系统完成")
+                warned = True
+            continue
+        return f"等待驱动操作失败（Windows 结果 {result}）"
+
+
 def _run_pnputil_elevated(arguments, timeout_seconds=120):
-    """有界等待提权。未处理的 UAC 不会阻碍应用进程退出。"""
-    results = Queue(maxsize=1)
-
-    def worker():
-        results.put(_shell_execute_pnputil(arguments, timeout_seconds))
-
-    threading.Thread(target=worker, daemon=True, name="pnputil elevation").start()
-    try:
-        return results.get(timeout=max(0.01, timeout_seconds) + 0.05)
-    except Empty:
-        return _ElevatedRun(None, error=f"管理员授权或驱动操作等待超过 {timeout_seconds} 秒；可稍后重试")
+    """等待 Windows 真实结果；UI 在 daemon 线程调用，不阻碍应用退出。"""
+    return _shell_execute_pnputil(arguments, timeout_seconds)
 
 
 def _resolved_device(scan, expected):

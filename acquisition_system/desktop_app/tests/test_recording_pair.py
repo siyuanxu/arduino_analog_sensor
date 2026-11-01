@@ -199,10 +199,14 @@ def test_sample_write_error_is_reported_and_close_attempts_both_streams(tmp_path
     closed_second = []
 
     class BadClose:
+        closed = True
+
         def close(self):
             raise OSError("first close error")
 
     class GoodClose:
+        closed = True
+
         def close(self):
             closed_second.append(True)
 

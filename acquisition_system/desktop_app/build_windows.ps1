@@ -45,7 +45,7 @@ if ($LASTEXITCODE -ne 0) { throw "打包失败" }
 $AcqPackagedDrivers = Join-Path $AcqDistRoot "ShearAcquisition\_internal\drivers\arduino-mega2560-official"
 Test-AcqDriverBundle $AcqPackagedDrivers
 
-$AcqArchive = Join-Path $AcqLocalRoot "ShearAcquisition-1.2.6-windows-x64.zip"
+$AcqArchive = Join-Path $AcqLocalRoot "ShearAcquisition-1.2.7-windows-x64.zip"
 if (Test-Path -LiteralPath $AcqArchive) { Remove-Item -LiteralPath $AcqArchive -Force }
 Compress-Archive -Path (Join-Path $AcqDistRoot "ShearAcquisition") -DestinationPath $AcqArchive
 Write-Host "输出：$AcqArchive"
